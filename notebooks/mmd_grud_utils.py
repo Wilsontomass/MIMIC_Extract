@@ -10,7 +10,12 @@ from torch.nn.parameter import Parameter
 
 def to_3D_tensor(df):
     idx = pd.IndexSlice
-    return np.dstack((df.loc[idx[:,:,:,i], :].values for i in sorted(set(df.index.get_level_values('hours_in')))))
+    arrs = []
+    for i in sorted(set(df.index.get_level_values("hours_in"))):
+        arrs.append(df.loc[idx[:,:,:,i], :].values)
+    result = np.dstack(arrs)
+    return result
+
 def prepare_dataloader(df, Ys, batch_size, shuffle=True):
     """
     dfs = (df_train, df_dev, df_test).
@@ -36,13 +41,20 @@ class FilterLinear(nn.Module):
         
         use_gpu = torch.cuda.is_available()
         self.filter_square_matrix = None
-        if use_gpu: self.filter_square_matrix = Variable(filter_square_matrix.cuda(), requires_grad=False)
-        else:       self.filter_square_matrix = Variable(filter_square_matrix, requires_grad=False)
-        
-        self.weight = Parameter(torch.Tensor(out_features, in_features))
+        if use_gpu: 
+            self.filter_square_matrix = Variable(filter_square_matrix.cuda(), requires_grad=False)
+            self.weight = Parameter(torch.Tensor(out_features, in_features).cuda())
+        else:       
+            self.filter_square_matrix = Variable(filter_square_matrix, requires_grad=False)
+            self.weight = Parameter(torch.Tensor(out_features, in_features))
 
-        if bias: self.bias = Parameter(torch.Tensor(out_features))
-        else:    self.register_parameter('bias', None)
+        if bias: 
+            if use_gpu:
+                self.bias = Parameter(torch.Tensor(out_features).cuda())
+            else:
+                self.bias = Parameter(torch.Tensor(out_features))
+        else:    
+            self.register_parameter('bias', None)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -108,9 +120,13 @@ class GRUD(nn.Module):
             self.zeros = Variable(torch.zeros(batch_size, input_size))
             self.zeros_h = Variable(torch.zeros(batch_size, self.hidden_size))
             self.X_mean = Variable(torch.Tensor(X_mean))
+            
+        
         
         self.zl = nn.Linear(input_size + hidden_size + self.mask_size, hidden_size) # Wz, Uz are part of the same network. the bias is bz
+        
         self.rl = nn.Linear(input_size + hidden_size + self.mask_size, hidden_size) # Wr, Ur are part of the same network. the bias is br
+        
         self.hl = nn.Linear(input_size + hidden_size + self.mask_size, hidden_size) # W, U are part of the same network. the bias is b
         
         self.gamma_x_l = FilterLinear(self.delta_size, self.delta_size, self.identity)
@@ -153,10 +169,10 @@ class GRUD(nn.Module):
         
         combined = torch.cat((x, h, mask), 1)
         z = torch.sigmoid(self.zl(combined)) #sigmoid(W_z*x_t + U_z*h_{t-1} + V_z*m_t + bz)
+        
         r = torch.sigmoid(self.rl(combined)) #sigmoid(W_r*x_t + U_r*h_{t-1} + V_r*m_t + br)
         h_tilde = torch.tanh(self.hl(combined)) #tanh(W*x_t +U(r_t*h_{t-1}) + V*m_t) + b
-        h = (1 - z) * h + z * h_tilde
-        
+        h = (1 - z) * h + z * h_tilde     
         return h
     
     def forward(self, X, X_last_obsv, Mask, Delta):
@@ -207,13 +223,10 @@ class GRUD(nn.Module):
 
         
 def Train_Model(
-    model, train_dataloader, valid_dataloader, num_epochs = 300, patience = 3, min_delta = 1e-5, learning_rate=1e-3, batch_size=None
-):
+    model, train_dataloader, valid_dataloader, num_epochs = 300, patience = 3, min_delta = 1e-5, learning_rate=1e-3, batch_size=None):
     
     print('Model Structure: ', model)
     print('Start Training ... ')
-    
-    model
     
     if (type(model) == nn.modules.container.Sequential):
         output_last = model[-1].output_last
@@ -230,7 +243,9 @@ def Train_Model(
     learning_rate = 0.001
 #     optimizer = torch.optim.RMSprop(model.parameters(), lr = learning_rate, alpha=0.99)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    use_gpu = False#torch.cuda.is_available()
+    use_gpu = torch.cuda.is_available()
+    if use_gpu:
+        model.to("cuda:0")
     
     interval = 100
     losses_train = []
@@ -269,6 +284,7 @@ def Train_Model(
             if use_gpu:
                 convert_to_cuda=lambda x: Variable(x.cuda())
                 X, X_last_obsv, Mask, Delta, labels = map(convert_to_cuda, [measurement, measurement_last_obsv, mask, time_, labels])
+                
             else: 
 #                 inputs, labels = Variable(inputs), Variable(labels)
                 convert_to_tensor=lambda x: Variable(x)
@@ -337,9 +353,6 @@ def Train_Model(
             
 #             outputs_val = model(inputs_val)
             prediction_val = model(X_val, X_last_obsv_val, Mask_val, Delta_val)
-    
-#             print(labels.shape)
-#             print(prediction_val.shape)
             
             if output_last:
                 loss_valid =loss_CEL(torch.squeeze(prediction_val), torch.squeeze(labels_val))
@@ -360,7 +373,10 @@ def Train_Model(
         avg_losses_epoch_valid = sum(losses_epoch_valid).cpu().numpy() / float(len(losses_epoch_valid))
         losses_epochs_train.append(avg_losses_epoch_train)
         losses_epochs_valid.append(avg_losses_epoch_valid)
-        
+        # print(losses_epoch_valid) 
+        # print(sum(losses_epoch_valid).cpu().numpy())
+        # print(float(len(losses_epoch_valid)))
+        # print("avg loss:" , avg_losses_epoch_valid)
         
         # Early Stopping
         if epoch == 0:
@@ -406,7 +422,7 @@ def predict_proba(model, dataloader):
         labels: size[num_samples]
     """
     model.eval()
-    use_gpu = False# torch.cuda.is_available()
+    use_gpu = torch.cuda.is_available()
     
     probabilities = []
     labels        = []
